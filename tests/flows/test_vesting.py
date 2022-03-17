@@ -171,3 +171,121 @@ def test_main(
         web3=web3, address=get_address_of_type(config, "Staking")
     )
     assert side_staking.get_vesting_amount(erc20_token.address) == vesting_amount
+
+
+def test_vesting_over_time(
+    web3,
+    config,
+    consumer_wallet,
+    publisher_wallet,
+    another_consumer_wallet,
+    factory_router,
+):
+    """Test more vesting cases."""
+    vesting_amount = to_wei("0.0018")
+    erc20_token, pool = _deployBPool(
+        web3, config, publisher_wallet, consumer_wallet, another_consumer_wallet
+    )
+    side_staking = SideStaking(
+        web3=web3, address=get_address_of_type(config, "Staking")
+    )
+    assert side_staking.get_vesting_amount(erc20_token.address) == vesting_amount
+
+
+def _deployBPool(
+    web3, config, publisher_wallet, consumer_wallet, another_consumer_wallet
+):
+    initial_ocean_liq = to_wei("0.02")
+
+    erc721_factory = ERC721FactoryContract(
+        web3, get_address_of_type(config, "ERC721Factory")
+    )
+
+    # Tests deploy erc721
+    tx = erc721_factory.deploy_erc721_contract(
+        name="NFT",
+        symbol="NFTS",
+        template_index=1,
+        additional_metadata_updater=ZERO_ADDRESS,
+        additional_erc20_deployer=ZERO_ADDRESS,
+        token_uri="https://oceanprotocol.com/nft/",
+        from_wallet=publisher_wallet,
+    )
+    tx_receipt = web3.eth.wait_for_transaction_receipt(tx)
+    registered_event = erc721_factory.get_event_log(
+        ERC721FactoryContract.EVENT_NFT_CREATED,
+        tx_receipt.blockNumber,
+        web3.eth.block_number,
+        None,
+    )
+    erc721_nft = ERC721NFT(web3=web3, address=registered_event[0].args.newTokenAddress)
+
+    erc721_nft.add_manager(another_consumer_wallet.address, publisher_wallet)
+
+    erc721_nft.add_to_create_erc20_list(
+        consumer_wallet.address, another_consumer_wallet
+    )
+    erc721_nft.add_to_metadata_list(consumer_wallet.address, another_consumer_wallet)
+    erc721_nft.add_to_725_store_list(consumer_wallet.address, another_consumer_wallet)
+
+    # Tests consumer deploys an ERC20DT
+    trx_erc_20 = erc721_nft.create_erc20(
+        template_index=1,
+        datatoken_name="ERC20DT1",
+        datatoken_symbol="ERC20DT1Symbol",
+        datatoken_minter=consumer_wallet.address,
+        datatoken_fee_manager=another_consumer_wallet.address,
+        datatoken_publishing_market_address=publisher_wallet.address,
+        fee_token_address=ZERO_ADDRESS,
+        datatoken_cap=to_wei("0.05"),
+        publishing_market_fee_amount=0,
+        bytess=[b""],
+        from_wallet=consumer_wallet,
+    )
+
+    tx_receipt = web3.eth.wait_for_transaction_receipt(trx_erc_20)
+    assert tx_receipt.status == 1
+
+    event = erc721_factory.get_event_log(
+        ERC721NFT.EVENT_TOKEN_CREATED,
+        tx_receipt.blockNumber,
+        web3.eth.block_number,
+        None,
+    )
+
+    dt_address = event[0].args.newTokenAddress
+    erc20_token = ERC20Token(web3=web3, address=dt_address)
+
+    ocean_contract = ERC20Token(web3=web3, address=get_address_of_type(config, "Ocean"))
+    ocean_contract.approve(
+        get_address_of_type(config, "Router"), to_wei("0.02"), consumer_wallet
+    )
+
+    tx = erc20_token.deploy_pool(
+        rate=to_wei(1),
+        basetoken_decimals=ocean_contract.decimals(),
+        vesting_amount=initial_ocean_liq // 100 * 9,
+        vested_blocks=2500000,
+        initial_liq=initial_ocean_liq,
+        lp_swap_fee=to_wei("0.001"),
+        market_swap_fee=to_wei("0.001"),
+        ss_contract=get_address_of_type(config, "Staking"),
+        basetoken_address=ocean_contract.address,
+        basetoken_sender=consumer_wallet.address,
+        publisher_address=consumer_wallet.address,
+        market_fee_collector=get_address_of_type(config, "OPFCommunityFeeCollector"),
+        pool_template_address=get_address_of_type(config, "poolTemplate"),
+        from_wallet=consumer_wallet,
+    )
+    tx_receipt = web3.eth.wait_for_transaction_receipt(tx)
+    pool_event = erc20_token.get_event_log(
+        ERC721FactoryContract.EVENT_NEW_POOL,
+        tx_receipt.blockNumber,
+        web3.eth.block_number,
+        None,
+    )
+
+    bpool_address = pool_event[0].args.poolAddress
+    bpool = BPool(web3, bpool_address)
+
+    return erc20_token, bpool
